@@ -1,3 +1,5 @@
+from comet_ml import Experiment
+experiment = Experiment(auto_metric_logging=False)
 import argparse
 import os
 import json
@@ -31,6 +33,7 @@ from metrics.fid import calc_fid
 from utils.torch_utils import DistributedMeter
 from utils.train_utils import *
 
+experiment.log_code('./models/anycost_gan.py')
 device = 'cuda'
 log_dir = 'log'
 checkpoint_dir = 'checkpoint'
@@ -39,6 +42,7 @@ best_fid = 1e9
 
 
 def train(epoch):
+    experiment.log_others(vars(args))
     generator.train()
     discriminator.train()
     g_ema.eval()
@@ -214,7 +218,16 @@ def train(epoch):
                 log_writer.add_scalar('Loss/path', path_loss_meter.avg.item(), n_trained_images)
                 log_writer.add_scalar('Loss/path-len', mean_path_length, n_trained_images)
                 log_writer.add_scalar('Loss/distill', distill_loss_meter.avg.item(), n_trained_images)
-
+                experiment.log_metric("train_Loss/D", d_loss,
+                                      step=n_trained_images,
+                                      epoch=epoch+1)
+                experiment.log_metric("train_Loss/G", g_loss,
+                                      step=n_trained_images,
+                                      epoch=epoch+1)
+                experiment.log_metric("train_Loss/r1",r1_loss,
+                                      step=n_trained_images,
+                                      epoch=epoch+1)
+                
             if hvd.rank() == 0 and global_idx % args.log_vis_every == 0:  # log image
                 with torch.no_grad():
                     g_ema.eval()
@@ -224,6 +237,11 @@ def train(epoch):
                     grid = utils.make_grid(sample, nrow=int(args.n_vis_sample ** 0.5), normalize=True,
                                            range=(-1, 1))
                     log_writer.add_image('images', grid, n_trained_images)
+                    experiment.log_image(grid.permute(1, 2, 0).
+                                         to('cpu').numpy(),
+                                         'images',
+                                         image_channels="last",
+                                         step=n_trained_images)
 
 
 def validate(epoch):
@@ -235,10 +253,19 @@ def validate(epoch):
             print(' * FID-0.5x: {:.2f}'.format(fid))
             log_writer.add_scalar('Metrics/fid-0.5x', fid,
                                   len(data_loader) * (epoch + 1) * args.batch_size * hvd.size())
+            experiment.log_metric('val_Metrics/fid-0.5x', fid,
+                                  step=len(data_loader) * (epoch + 1) *
+                                  args.batch_size * hvd.size(),
+                                  epoch=epoch+1)
 
     fid = measure_fid()
     if hvd.rank() == 0:
         log_writer.add_scalar('Metrics/fid', fid, len(data_loader) * (epoch + 1) * args.batch_size * hvd.size())
+        experiment.log_metric('val_Metrics/fid', fid,
+                              step=len(data_loader) * (epoch + 1) *
+                              args.batch_size * hvd.size(),
+                              epoch=epoch+1)
+
     global best_fid
     best_fid = min(best_fid, fid)
     if hvd.rank() == 0:
@@ -257,6 +284,7 @@ def validate(epoch):
         torch.save(state_dict, os.path.join(checkpoint_dir, args.job, 'ckpt.pt'))
         if best_fid == fid:
             torch.save(state_dict, os.path.join(checkpoint_dir, args.job, 'ckpt-best.pt'))
+            experiment.log_asset(state_dict, 'ckpt-best.pt')
 
 
 def measure_fid():
