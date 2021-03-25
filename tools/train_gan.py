@@ -284,8 +284,7 @@ def validate(epoch):
         torch.save(state_dict, os.path.join(checkpoint_dir, args.job, 'ckpt.pt'))
         if best_fid == fid:
             torch.save(state_dict, os.path.join(checkpoint_dir, args.job, 'ckpt-best.pt'))
-            experiment.log_asset(state_dict, 'ckpt-best.pt')
-
+            
 
 def measure_fid():
     # get all the resolutions to evaluate fid
