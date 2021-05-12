@@ -1,3 +1,6 @@
+import sys
+sys.path.append('.')  # to run from the project root dir
+from utils.comet_utils import CometLogger
 import argparse
 import os
 import json
@@ -18,8 +21,7 @@ import lpips
 
 import horovod.torch as hvd
 
-import sys
-sys.path.append('.')  # to run from the project root dir
+
 from utils.datasets import NativeDataset
 from utils.losses import d_logistic_loss, d_r1_loss, g_nonsaturating_loss, g_path_regularize
 from torch.utils.tensorboard import SummaryWriter
@@ -38,7 +40,8 @@ checkpoint_dir = 'checkpoint'
 best_fid = 1e9
 
 
-def train(epoch):
+def train(epoch, comet_logger):
+    comet_logger.log_others(vars(args))
     generator.train()
     discriminator.train()
     g_ema.eval()
@@ -214,7 +217,16 @@ def train(epoch):
                 log_writer.add_scalar('Loss/path', path_loss_meter.avg.item(), n_trained_images)
                 log_writer.add_scalar('Loss/path-len', mean_path_length, n_trained_images)
                 log_writer.add_scalar('Loss/distill', distill_loss_meter.avg.item(), n_trained_images)
-
+                comet_logger.log_metric("train_Loss/D", d_loss,
+                                        step=n_trained_images,
+                                        epoch=epoch+1)
+                comet_logger.log_metric("train_Loss/G", g_loss,
+                                        step=n_trained_images,
+                                        epoch=epoch+1)
+                comet_logger.log_metric("train_Loss/r1",r1_loss,
+                                        step=n_trained_images,
+                                        epoch=epoch+1)
+                
             if hvd.rank() == 0 and global_idx % args.log_vis_every == 0:  # log image
                 with torch.no_grad():
                     g_ema.eval()
@@ -224,9 +236,14 @@ def train(epoch):
                     grid = utils.make_grid(sample, nrow=int(args.n_vis_sample ** 0.5), normalize=True,
                                            range=(-1, 1))
                     log_writer.add_image('images', grid, n_trained_images)
+                    comet_logger.log_image(grid.permute(1, 2, 0).
+                                           to('cpu').numpy(),
+                                           'images',
+                                           image_channels="last",
+                                           step=n_trained_images)
 
 
-def validate(epoch):
+def validate(epoch, comet_logger):
     if args.dynamic_channel:  # we also evaluate the model with half channels
         set_uniform_channel_ratio(g_ema, 0.5)
         fid = measure_fid()
@@ -235,10 +252,19 @@ def validate(epoch):
             print(' * FID-0.5x: {:.2f}'.format(fid))
             log_writer.add_scalar('Metrics/fid-0.5x', fid,
                                   len(data_loader) * (epoch + 1) * args.batch_size * hvd.size())
+            comet_logger.log_metric('val_Metrics/fid-0.5x', fid,
+                                    step=len(data_loader) * (epoch + 1) *
+                                    args.batch_size * hvd.size(),
+                                    epoch=epoch+1)
 
     fid = measure_fid()
     if hvd.rank() == 0:
         log_writer.add_scalar('Metrics/fid', fid, len(data_loader) * (epoch + 1) * args.batch_size * hvd.size())
+        comet_logger.log_metric('val_Metrics/fid', fid,
+                                step=len(data_loader) * (epoch + 1) *
+                                args.batch_size * hvd.size(),
+                                epoch=epoch+1)
+
     global best_fid
     best_fid = min(best_fid, fid)
     if hvd.rank() == 0:
@@ -257,7 +283,7 @@ def validate(epoch):
         torch.save(state_dict, os.path.join(checkpoint_dir, args.job, 'ckpt.pt'))
         if best_fid == fid:
             torch.save(state_dict, os.path.join(checkpoint_dir, args.job, 'ckpt-best.pt'))
-
+            
 
 def measure_fid():
     # get all the resolutions to evaluate fid
@@ -331,6 +357,7 @@ if __name__ == "__main__":
     parser.add_argument("--log_every", type=int, default=100, help='log training loss every')
     parser.add_argument("--log_vis_every", type=int, default=1000, help='log visualization every')
     parser.add_argument('--vis_truncation', type=float, default=0.5)
+    parser.add_argument('--comet', type=bool, default=False, help='enable comet logging')
     # models setting
     parser.add_argument("--resolution", type=int, default=1024)
     parser.add_argument("--channel_multiplier", type=float, default=2)
@@ -352,6 +379,8 @@ if __name__ == "__main__":
     parser.add_argument('--divided_by', type=int, default=4)
 
     args = parser.parse_args()
+    comet_logger = CometLogger(args.comet, auto_metric_logging=False)
+    comet_logger.log_code('./models/anycost_gan.py')
 
     hvd.init()
     torch.cuda.set_device(hvd.local_rank())
@@ -518,5 +547,5 @@ if __name__ == "__main__":
     sample_z = torch.randn(args.n_vis_sample, 1, args.latent_dim).float().to(device)
 
     for i_epoch in range(resume_from_epoch, args.epochs):
-        train(i_epoch)
-        validate(i_epoch)
+        train(i_epoch, comet_logger)
+        validate(i_epoch, comet_logger)
